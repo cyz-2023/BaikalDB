@@ -100,6 +100,7 @@ void NetworkServer::report_heart_beat() {
 
         if (FLAGS_auto_update_meta_list) {
             update_meta_list();
+            update_meta_leader();
         }
 
         _heart_beat_count << -1;
@@ -107,13 +108,27 @@ void NetworkServer::report_heart_beat() {
     }
 }
 
+void NetworkServer::update_meta_leader() {
+    if (MetaServerInteract::get_auto_incr_instance()->is_inited()) {
+        pb::RaftControlRequest req;
+        req.set_op_type(pb::GetLeader);
+        req.set_region_id(1);
+        pb::RaftControlResponse res;
+        MetaServerInteract::get_auto_incr_instance()->send_request("raft_control", req, res);
+    }
+    if (MetaServerInteract::get_tso_instance()->is_inited()) {
+        pb::RaftControlRequest req;
+        req.set_op_type(pb::GetLeader);
+        req.set_region_id(2);
+        pb::RaftControlResponse res;
+        MetaServerInteract::get_tso_instance()->send_request("raft_control", req, res);
+    }
+}
+
 void NetworkServer::update_meta_list() {
     pb::RaftControlRequest req;
     req.set_op_type(pb::GetPeerList);
     pb::RaftControlResponse res;
-    if (!MetaServerInteract::get_instance()->is_inited()) {
-        return;
-    }
     if (MetaServerInteract::get_instance()->send_request("raft_control", req, res) == 0) {
         std::string meta_list = "";
         for (auto i = 0; i < res.peers_size(); i ++) {
@@ -1221,7 +1236,7 @@ int NetworkServer::fetch_instance_info() {
     auto auto_increment_ptr = request.mutable_auto_increment();
     auto_increment_ptr->set_table_id(instance_tableid);
     auto_increment_ptr->set_count(1);
-    if (MetaServerInteract::get_instance()->send_request("meta_manager", 
+    if (MetaServerInteract::get_auto_incr_instance()->send_request("meta_manager", 
                                                           request, 
                                                           response) != 0) {
         DB_FATAL("fetch_instance_info from meta_server fail");

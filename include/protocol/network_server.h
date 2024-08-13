@@ -104,6 +104,7 @@ private:
     void construct_other_heart_beat_request(pb::BaikalOtherHeartBeatRequest& request);
     void process_other_heart_beat_response(const pb::BaikalOtherHeartBeatResponse& response);
     void update_meta_list();
+    void update_meta_leader();
     void client_conn_bvars_update();
 
     std::string state2str(SmartSocket client);

@@ -30,6 +30,8 @@
 
 namespace baikaldb {
 DECLARE_int64(time_between_meta_connect_error_ms);
+
+typedef std::shared_ptr<brpc::Channel> SmartChannel;
 class MetaServerInteract {
 public:
     static const int RETRY_TIMES = 5;
@@ -100,13 +102,23 @@ public:
                 }
                 short_channel.CallMethod(method, &cntl, &request, &response, NULL);
             } else {
-                std::unique_lock<std::mutex> lck(_bns_channel_mutex);
-                _bns_channel->CallMethod(method, &cntl, &request, &response, NULL);
+                std::unique_lock<std::mutex> lock(_bns_channel_mutex);
+                SmartChannel tmp_channel = _bns_channel;
+                lock.unlock();
+                if (tmp_channel.get() == nullptr) {
+                    DB_WARNING("connet with meta server fail. bns_channel is not init");
+                    return -1;
+                }
+                tmp_channel->CallMethod(method, &cntl, &request, &response, NULL);
                 if (!cntl.Failed() && response.errcode() == pb::SUCCESS) {
                     _set_leader_address(cntl.remote_side());
                     DB_WARNING("connet with meta server success by bns name, leader:%s",
                                 butil::endpoint2str(cntl.remote_side()).c_str());
                     return 0;
+                } else if (cntl.Failed()) {
+                    DB_WARNING("connet with meta server fail by bns name, error:%s, log_id: %lu",
+                                cntl.ErrorText().c_str(), cntl.log_id());
+                    return -1;
                 }
             }
 
@@ -115,8 +127,9 @@ public:
                 DB_WARNING("connect with server fail. send request fail, error:%s, log_id:%lu",
                             cntl.ErrorText().c_str(), cntl.log_id());
                 _set_leader_address(butil::EndPoint());
-                ++retry_time;
-                continue;
+                return -1;
+                // ++retry_time;
+                // continue;
             }
             if (response.errcode() == pb::HAVE_NOT_INIT) {
                 DB_WARNING("connect with server fail. HAVE_NOT_INIT  log_id:%lu",
@@ -152,7 +165,7 @@ public:
         _master_leader_address = addr;
     }
 private:
-    brpc::Channel *_bns_channel = nullptr;
+    SmartChannel _bns_channel;
     int32_t _request_timeout = 30000;
     int32_t _connect_timeout = 5000;
     bool _is_inited = false;

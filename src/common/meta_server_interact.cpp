@@ -53,9 +53,7 @@ int MetaServerInteract::init_internal(const std::string& meta_bns) {
         meta_server_addr = std::string("list://") + meta_bns;
     }
     std::unique_lock<std::mutex> lck(_bns_channel_mutex);
-    if (_bns_channel == nullptr) {
-        _bns_channel = new brpc::Channel();
-    }
+    _bns_channel.reset(new brpc::Channel());
     if (_bns_channel->Init(meta_server_addr.c_str(), "rr", &channel_opt) != 0) {
         DB_FATAL("meta server bns pool init fail. bns_name:%s", meta_server_addr.c_str());
         return -1;
@@ -83,8 +81,7 @@ int MetaServerInteract::reset_bns_channel(const std::string& meta_bns) {
         return -1;
     }
     std::unique_lock<std::mutex> lck(_bns_channel_mutex);
-    SAFE_DELETE(_bns_channel);
-    _bns_channel = tmp;
+    _bns_channel.reset(tmp);
     return 0; 
 }
 }
