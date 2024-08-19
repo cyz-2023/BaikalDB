@@ -122,62 +122,6 @@ int AggNode::open(RuntimeState* state) {
     }
     _mem_row_desc = state->mem_row_desc();
 
-    TimeCost cost;
-    int64_t agg_time = 0;
-    int64_t scan_time = 0;
-    for (auto child : _children) {
-        bool eos = false;
-        do {
-            if (state->is_cancelled()) {
-                _iter = _hash_map.begin();
-                DB_WARNING_STATE(state, "cancelled");
-                return 0;
-            }
-            TimeCost cost;
-            RowBatch batch;
-            ret = child->get_next(state, &batch, &eos);
-            if (ret < 0) {
-                _iter = _hash_map.begin();
-                DB_WARNING_STATE(state, "child->get_next fail, ret:%d", ret);
-                return ret;
-            }
-            scan_time += cost.get_time();
-            cost.reset();
-            int64_t used_size = 0;
-            int64_t release_size = 0;
-            process_row_batch(state, batch, used_size, release_size);
-            agg_time += cost.get_time();
-            _row_cnt += batch.size();
-            state->memory_limit_release(_row_cnt, release_size);
-            if (state->memory_limit_exceeded(_row_cnt, used_size) != 0) {
-                _iter = _hash_map.begin();
-                DB_WARNING_STATE(state, "memory limit exceeded");
-                return -1;
-            }
-            // 对于用order by分组的特殊优化
-            //if (_agg_tuple_id == -1 && _limit != -1 && (int64_t)_hash_map.size() >= _limit) {
-            //    break;
-            //}
-        } while (!eos);
-    }
-    LOCAL_TRACE_DESC << "agg time cost:" << agg_time << 
-        " scan time cost:" << scan_time << " rows:" << _row_cnt;
-
-    // 兼容mysql: select count(*) from t; 无数据时返回0
-    if (_hash_map.size() == 0 && _group_exprs.size() == 0) {
-        ExecNode* packet = get_parent_node(pb::PACKET_NODE);
-        // baikaldb才有packet_node;只在baikaldb上产生数据
-        // TODB:join和子查询后续如果要完全推到store运行得注意
-        if (packet != nullptr) {
-            std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
-            uint8_t null_flag = 0;
-            MutTableKey key;
-            key.append_u8(null_flag);
-            int64_t used_size= 0;
-            AggFnCall::initialize_all(_agg_fn_calls, key.data(), row.get(), used_size, true);
-            _hash_map.insert(key.data(), row.release());
-        }
-    }
     _iter = _hash_map.begin();
     return 0;
 }
@@ -237,6 +181,67 @@ int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         local_node.set_affect_rows(_num_rows_returned);
     }));
 
+    TimeCost cost;
+    int64_t agg_time = 0;
+    int64_t scan_time = 0;
+    for (auto child : _children) {
+        bool eos = false;
+        do {
+            if (state->is_cancelled()) {
+                _iter = _hash_map.begin();
+                DB_WARNING_STATE(state, "cancelled");
+                return 0;
+            }
+            TimeCost cost;
+            RowBatch batch;
+            auto ret = child->get_next(state, &batch, &eos);
+            if (ret < 0) {
+                _iter = _hash_map.begin();
+                DB_WARNING_STATE(state, "child->get_next fail, ret:%d", ret);
+                return ret;
+            }
+            scan_time += cost.get_time();
+            cost.reset();
+            int64_t used_size = 0;
+            int64_t release_size = 0;
+            process_row_batch(state, batch, used_size, release_size);
+            agg_time += cost.get_time();
+            _row_cnt += batch.size();
+            state->memory_limit_release(_row_cnt, release_size);
+            if (state->memory_limit_exceeded(_row_cnt, used_size) != 0) {
+                _iter = _hash_map.begin();
+                DB_WARNING_STATE(state, "memory limit exceeded");
+                return -1;
+            }
+            if (_limit > 0 && _agg_fn_calls.size() == 0 && _hash_map.size() >= _limit) {
+                eos = true;
+            }
+            // 对于用order by分组的特殊优化
+            //if (_agg_tuple_id == -1 && _limit != -1 && (int64_t)_hash_map.size() >= _limit) {
+            //    break;
+            //}
+        } while (!eos);
+    }
+    LOCAL_TRACE_DESC << "agg time cost:" << agg_time << 
+        " scan time cost:" << scan_time << " rows:" << _row_cnt;
+
+    // 兼容mysql: select count(*) from t; 无数据时返回0
+    if (_hash_map.size() == 0 && _group_exprs.size() == 0) {
+        ExecNode* packet = get_parent_node(pb::PACKET_NODE);
+        // baikaldb才有packet_node;只在baikaldb上产生数据
+        // TODB:join和子查询后续如果要完全推到store运行得注意
+        if (packet != nullptr) {
+            std::unique_ptr<MemRow> row = _mem_row_desc->fetch_mem_row();
+            uint8_t null_flag = 0;
+            MutTableKey key;
+            key.append_u8(null_flag);
+            int64_t used_size= 0;
+            AggFnCall::initialize_all(_agg_fn_calls, key.data(), row.get(), used_size, true);
+            _hash_map.insert(key.data(), row.release());
+        }
+    }
+    _iter = _hash_map.begin();
+
     while (1) {
         if (state->is_cancelled()) {
             DB_WARNING_STATE(state, "cancelled");
@@ -256,6 +261,7 @@ int AggNode::get_next(RuntimeState* state, RowBatch* batch, bool* eos) {
         _iter->second = nullptr;
         _iter++;
     }
+    return 0;
 }
 
 void AggNode::close(RuntimeState* state) {
